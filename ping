@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Pong P2P com PeerJS</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        body {
+            background-color: #222;
+            color: white;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        canvas {
+            background-color: #000;
+            border: 2px solid #fff;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.2);
+        }
+        #menu {
+            margin-bottom: 20px;
+            text-align: center;
+            background: #333;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        input {
+            padding: 8px;
+            border-radius: 4px;
+            border: none;
+        }
+        button {
+            padding: 8px 15px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        button:hover { background-color: #45a049; }
+        .status { margin-top: 10px; font-size: 0.9em; color: #aaa; }
+        #myIdDisplay { color: #4CAF50; font-weight: bold; user-select: text; }
+    </style>
+</head>
+<body>
+
+    <div id="menu">
+        <h2>🏓 Pong P2P</h2>
+        <div id="loading">Gerando seu ID...</div>
+        
+        <div id="connectionPanel" style="display:none;">
+            <p>Seu ID: <span id="myIdDisplay">---</span></p>
+            <hr style="border-color: #555;">
+            <p>Para jogar com um amigo:</p>
+            <input type="text" id="remoteIdInput" placeholder="Cole o ID do amigo aqui">
+            <button onclick="connectToPeer()">Conectar</button>
+        </div>
+        <div class="status" id="statusMsg">Aguardando conexão...</div>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="400" style="display:none;"></canvas>
+
+    <script>
+        // --- CONFIGURAÇÃO DO JOGO ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Estado do Jogo
+        let isHost = false;
+        let gameRunning = false;
+        let conn = null; // Conexão PeerJS
+
+        // Objetos do Jogo
+        const ball = { x: 400, y: 200, r: 10, speed: 5, dx: 5, dy: 5 };
+        const paddleHeight = 100;
+        const paddleWidth = 10;
+        
+        // Player 1 (Esquerda - Host)
+        const p1 = { x: 0, y: 150, score: 0 };
+        // Player 2 (Direita - Cliente)
+        const p2 = { x: 790, y: 150, score: 0 };
+
+        // Controles
+        const keys = {};
+
+        // --- PEERJS (REDE) ---
+        const peer = new Peer(); // Cria um novo par sem ID específico (o servidor gera um)
+
+        peer.on('open', (id) => {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('connectionPanel').style.display = 'block';
+            document.getElementById('myIdDisplay').innerText = id;
+        });
+
+        peer.on('connection', (connection) => {
+            // Isso acontece no lado do HOST quando alguém conecta
+            conn = connection;
+            isHost = true;
+            setupConnection();
+        });
+
+        function connectToPeer() {
+            // Isso acontece no lado do CLIENTE quando clica em conectar
+            const remoteId = document.getElementById('remoteIdInput').value;
+            if (!remoteId) return alert("Insira o ID do amigo!");
+            
+            conn = peer.connect(remoteId);
+            isHost = false;
+            setupConnection();
+        }
+
+        function setupConnection() {
+            document.getElementById('statusMsg').innerText = "Conectado! Iniciando jogo...";
+            
+            conn.on('open', () => {
+                startGame();
+                
+                // Receber dados
+                conn.on('data', (data) => {
+                    handleData(data);
+                });
+            });
+        }
+
+        function handleData(data) {
+            if (isHost) {
+                // Host recebe apenas a posição Y do Player 2
+                if (data.type === 'move') {
+                    p2.y = data.y;
+                }
+            } else {
+                // Cliente recebe o estado completo do jogo (Bola, P1, Placar)
+                if (data.type === 'update') {
+                    ball.x = data.ball.x;
+                    ball.y = data.ball.y;
+                    p1.y = data.p1Y;
+                    p1.score = data.score.p1;
+                    p2.score = data.score.p2;
+                }
+            }
+        }
+
+        // --- LÓGICA DO JOGO ---
+
+        function startGame() {
+            document.getElementById('menu').style.display = 'none';
+            canvas.style.display = 'block';
+            gameRunning = true;
+            gameLoop();
+        }
+
+        document.addEventListener('keydown', e => keys[e.key] = true);
+        document.addEventListener('keyup', e => keys[e.key] = false);
+
+        function update() {
+            // Movimentação Local
+            // Se for Host, controla P1 (Esquerda). Se for Cliente, controla P2 (Direita).
+            const myPaddle = isHost ? p1 : p2;
+            
+            if (keys['ArrowUp'] && myPaddle.y > 0) {
+                myPaddle.y -= 8;
+            }
+            if (keys['ArrowDown'] && myPaddle.y < canvas.height - paddleHeight) {
+                myPaddle.y += 8;
+            }
+
+            // Lógica de Rede: Enviar dados
+            if (conn && conn.open) {
+                if (isHost) {
+                    // Host calcula física da bola
+                    moveBall();
+                    // Envia estado do jogo para o cliente
+                    conn.send({
+                        type: 'update',
+                        ball: { x: ball.x, y: ball.y },
+                        p1Y: p1.y,
+                        score: { p1: p1.score, p2: p2.score }
+                    });
+                } else {
+                    // Cliente envia apenas sua posição
+                    conn.send({
+                        type: 'move',
+                        y: p2.y
+                    });
+                }
+            }
+        }
+
+        function moveBall() {
+            ball.x += ball.dx;
+            ball.y += ball.dy;
+
+            // Colisão com paredes (topo/baixo)
+            if (ball.y + ball.r > canvas.height || ball.y - ball.r < 0) {
+                ball.dy *= -1;
+            }
+
+            // Colisão com Raquetes (AABB Simples)
+            // P1 (Esquerda)
+            if (ball.x - ball.r < p1.x + paddleWidth && ball.y > p1.y && ball.y < p1.y + paddleHeight) {
+                ball.dx = Math.abs(ball.dx); // Força bola para direita
+                ball.dx += 0.5; // Aumenta velocidade
+            }
+            // P2 (Direita)
+            if (ball.x + ball.r > p2.x && ball.y > p2.y && ball.y < p2.y + paddleHeight) {
+                ball.dx = -Math.abs(ball.dx); // Força bola para esquerda
+                ball.dx -= 0.5;
+            }
+
+            // Pontuação
+            if (ball.x < 0) {
+                p2.score++;
+                resetBall();
+            } else if (ball.x > canvas.width) {
+                p1.score++;
+                resetBall();
+            }
+        }
+
+        function resetBall() {
+            ball.x = canvas.width / 2;
+            ball.y = canvas.height / 2;
+            ball.dx = -ball.dx; // Inverte direção inicial
+            ball.speed = 5;
+            // Retorna velocidade base
+            ball.dx = (ball.dx > 0 ? 5 : -5);
+            ball.dy = 5;
+        }
+
+        function draw() {
+            // Limpa tela
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Linha central
+            ctx.strokeStyle = 'white';
+            ctx.setLineDash([10, 15]);
+            ctx.beginPath();
+            ctx.moveTo(canvas.width / 2, 0);
+            ctx.lineTo(canvas.width / 2, canvas.height);
+            ctx.stroke();
+
+            // Desenha Bola
+            ctx.fillStyle = 'white';
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Desenha Raquetes
+            ctx.fillStyle = isHost ? '#4CAF50' : 'white'; // P1 Verde se você for o Host
+            ctx.fillRect(p1.x, p1.y, paddleWidth, paddleHeight);
+
+            ctx.fillStyle = !isHost ? '#4CAF50' : 'white'; // P2 Verde se você for o Cliente
+            ctx.fillRect(p2.x, p2.y, paddleWidth, paddleHeight);
+
+            // Placar
+            ctx.font = "30px Courier New";
+            ctx.fillStyle = "white";
+            ctx.fillText(p1.score, 300, 50);
+            ctx.fillText(p2.score, 500, 50);
+        }
+
+        function gameLoop() {
+            if (!gameRunning) return;
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+    </script>
+</body>
+</html>
